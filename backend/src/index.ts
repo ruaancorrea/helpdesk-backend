@@ -1,4 +1,6 @@
 import dotenv from 'dotenv';
+import { v2 as cloudinary } from 'cloudinary';
+import multer from 'multer';
 dotenv.config(); // Carrega as variáveis de ambiente primeiro
 
 import express, { Request, Response } from 'express';
@@ -6,6 +8,17 @@ import cors from 'cors';
 import { db } from './config/firebase';
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer'; // Importar o nodemailer
+
+
+// Configuração do Cloudinary
+cloudinary.config({ 
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
+  api_key: process.env.CLOUDINARY_API_KEY, 
+  api_secret: process.env.CLOUDINARY_API_SECRET 
+});
+
+// Configuração do Multer para guardar o ficheiro temporariamente em memória
+const upload = multer({ storage: multer.memoryStorage() });
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -322,6 +335,23 @@ app.post('/send-test-email', async (req: Request, res: Response) => {
         console.error("Erro ao enviar e-mail de teste:", error);
         res.status(500).send(`Erro ao enviar e-mail de teste: ${error.message}`);
     }
+});
+
+// --- ROTA PARA UPLOAD DE FICHEIROS ---
+app.post('/upload', upload.single('file'), (req: Request, res: Response) => {
+    if (!req.file) {
+        return res.status(400).send('Nenhum ficheiro enviado.');
+    }
+
+    // Enviar o ficheiro do buffer de memória para o Cloudinary
+    cloudinary.uploader.upload_stream({ resource_type: 'auto' }, (error, result) => {
+        if (error || !result) {
+            console.error("Erro no upload para o Cloudinary:", error);
+            return res.status(500).send('Erro ao fazer upload do ficheiro.');
+        }
+        // Enviar de volta a URL segura e o nome original do ficheiro
+        res.status(200).json({ url: result.secure_url, name: req.file.originalname });
+    }).end(req.file.buffer);
 });
 
 app.listen(port, () => {
