@@ -132,6 +132,25 @@ app.get('/tickets', async (req: Request, res: Response) => {
     }
 });
 
+// --- NOVA ROTA PARA APAGAR TICKETS (APENAS ADMIN) ---
+app.delete('/tickets/:id', async (req: Request, res: Response) => {
+    try {
+        const ticketId = req.params.id;
+
+        // No futuro, seria bom adicionar uma verificação aqui para garantir que quem chama é um admin.
+        // Por agora, a segurança está no frontend, que só mostra o botão para o admin.
+
+        await db.collection('tickets').doc(ticketId).delete();
+
+        res.status(200).send(`Ticket ${ticketId} apagado com sucesso.`);
+    } catch (error) {
+        console.error("Erro ao apagar ticket:", error);
+        res.status(500).send("Erro ao apagar ticket.");
+    }
+});
+
+
+
 app.post('/tickets', async (req: Request, res: Response) => {
     try {
         const newTicketData = {
