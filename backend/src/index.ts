@@ -45,13 +45,11 @@ async function sendNotificationEmail(to: string, subject: string, html: string) 
         console.log(`E-mail de notificação enviado para: ${to}`);
     } catch (error) {
         console.error(`Falha ao enviar e-mail para ${to}:`, error);
-        // Não retorna um erro para a requisição principal não falhar
     }
 }
 
 
 // --- ROTAS DE AUTENTICAÇÃO ---
-
 app.post('/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -60,15 +58,12 @@ app.post('/login', async (req: Request, res: Response) => {
   try {
     const usersRef = db.collection('users');
     const snapshot = await usersRef.where('email', '==', email).where('password', '==', password).limit(1).get();
-
     if (snapshot.empty) {
       return res.status(401).json({ success: false, message: 'Email ou senha incorretos' });
     }
-
     const userDoc = snapshot.docs[0];
     const user = { id: userDoc.id, ...userDoc.data() };
     res.status(200).json({ success: true, user });
-
   } catch (error) {
     console.error("Erro no login:", error);
     res.status(500).send("Erro no servidor durante o login.");
@@ -77,7 +72,6 @@ app.post('/login', async (req: Request, res: Response) => {
 
 
 // --- ROTAS DE USUÁRIOS (CRUD) ---
-
 app.get('/users', async (req: Request, res: Response) => {
   try {
     const usersSnapshot = await db.collection('users').get();
@@ -91,10 +85,7 @@ app.get('/users', async (req: Request, res: Response) => {
 
 app.post('/users', async (req: Request, res: Response) => {
     try {
-        const newUser = {
-            ...req.body,
-            createdAt: Timestamp.now().toDate().toISOString(),
-        };
+        const newUser = { ...req.body, createdAt: Timestamp.now().toDate().toISOString() };
         const docRef = await db.collection('users').add(newUser);
         res.status(201).json({ id: docRef.id, ...newUser });
     } catch (error) {
@@ -117,7 +108,6 @@ app.put('/users/:id', async (req: Request, res: Response) => {
 
 
 // --- ROTAS DE TICKETS (CRUD) ---
-
 app.get('/tickets', async (req: Request, res: Response) => {
     try {
         const ticketsSnapshot = await db.collection('tickets').get();
@@ -142,7 +132,7 @@ app.post('/tickets', async (req: Request, res: Response) => {
         const newTicket = { id: docRef.id, ...newTicketData };
         res.status(201).json(newTicket);
 
-        // --- LÓGICA DE E-MAIL PARA TÉCNICOS ---
+        // Notificar técnicos sobre novo chamado
         console.log('Iniciando envio de e-mail para técnicos...');
         const techsSnapshot = await db.collection('users').where('role', '==', 'technician').get();
         if (!techsSnapshot.empty) {
@@ -151,16 +141,11 @@ app.post('/tickets', async (req: Request, res: Response) => {
                         <p><b>Título:</b> ${newTicket.title}</p>
                         <p><b>Prioridade:</b> ${newTicket.priority}</p>
                         <p>Por favor, verifique o painel para mais detalhes.</p>`;
-            
             techsSnapshot.forEach(doc => {
                 const tech = doc.data();
-                if (tech.email) {
-                    sendNotificationEmail(tech.email, subject, html);
-                }
+                if (tech.email) sendNotificationEmail(tech.email, subject, html);
             });
         }
-        // --- FIM DA LÓGICA DE E-MAIL ---
-
     } catch (error) {
         console.error("Erro ao criar ticket:", error);
         res.status(500).send("Erro ao criar ticket.");
@@ -170,38 +155,13 @@ app.post('/tickets', async (req: Request, res: Response) => {
 app.put('/tickets/:id', async (req: Request, res: Response) => {
     try {
         const ticketId = req.params.id;
-        
-        // Buscar o estado anterior do ticket para comparar
-        const ticketBeforeSnap = await db.collection('tickets').doc(ticketId).get();
-        if (!ticketBeforeSnap.exists) {
-            return res.status(404).send("Chamado não encontrado.");
-        }
-        const ticketBefore = ticketBeforeSnap.data();
-
         const ticketData = {
             ...req.body,
             updatedAt: Timestamp.now().toDate().toISOString(),
         };
         await db.collection('tickets').doc(ticketId).update(ticketData);
+        // LÓGICA DE E-MAIL REMOVIDA DAQUI PARA EVITAR DUPLICIDADE
         res.status(200).json({ id: ticketId, ...ticketData });
-        
-        // --- LÓGICA DE E-MAIL PARA USUÁRIO (MUDANÇA DE STATUS) ---
-        if (ticketBefore && ticketData.status !== ticketBefore.status) {
-            console.log(`Status do chamado ${ticketId} alterado. Enviando e-mail...`);
-            const userSnap = await db.collection('users').doc(ticketBefore.userId).get();
-            if (userSnap.exists) {
-                const user = userSnap.data();
-                if (user && user.email) {
-                    const subject = `Atualização no seu Chamado: ${ticketBefore.title}`;
-                    const html = `<p>Olá, ${user.name}!</p>
-                                <p>O status do seu chamado "${ticketBefore.title}" foi alterado para: <b>${ticketData.status}</b>.</p>
-                                <p>Acesse o portal para mais detalhes.</p>`;
-                    sendNotificationEmail(user.email, subject, html);
-                }
-            }
-        }
-        // --- FIM DA LÓGICA DE E-MAIL ---
-
     } catch (error) {
         console.error("Erro ao atualizar ticket:", error);
         res.status(500).send("Erro ao atualizar ticket.");
@@ -211,6 +171,12 @@ app.put('/tickets/:id', async (req: Request, res: Response) => {
 app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
     try {
         const ticketId = req.params.id;
+        
+        // Buscar o estado anterior do ticket para comparar
+        const ticketBeforeSnap = await db.collection('tickets').doc(ticketId).get();
+        if (!ticketBeforeSnap.exists) return res.status(404).send("Chamado não encontrado.");
+        const ticketBefore = ticketBeforeSnap.data();
+
         const timelineEntry = {
             id: Math.random().toString(36).substring(7),
             ...req.body,
@@ -222,24 +188,31 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
         });
         res.status(201).json(timelineEntry);
 
-        // --- LÓGICA DE E-MAIL PARA USUÁRIO (NOVO COMENTÁRIO) ---
-        console.log(`Novo comentário no chamado ${ticketId}. Enviando e-mail...`);
-        const ticketSnap = await db.collection('tickets').doc(ticketId).get();
-        if (ticketSnap.exists) {
-            const ticket = ticketSnap.data();
-            if (ticket) {
-                const userSnap = await db.collection('users').doc(ticket.userId).get();
-                 if (userSnap.exists) {
-                    const user = userSnap.data();
-                    if (user && user.email) {
-                        const subject = `Nova Resposta no seu Chamado: ${ticket.title}`;
-                        const html = `<p>Olá, ${user.name}!</p>
-                                    <p>Houve uma nova resposta no seu chamado "${ticket.title}".</p>
-                                    <p><b>Comentário de ${timelineEntry.userName}:</b></p>
-                                    <p><i>"${timelineEntry.message}"</i></p>
-                                    <p>Acesse o portal para responder.</p>`;
-                        sendNotificationEmail(user.email, subject, html);
+        // --- LÓGICA DE E-MAIL CENTRALIZADA PARA USUÁRIO ---
+        if (ticketBefore) {
+            const userSnap = await db.collection('users').doc(ticketBefore.userId).get();
+            if (userSnap.exists) {
+                const user = userSnap.data();
+                if (user && user.email) {
+                    const ticketAfterSnap = await db.collection('tickets').doc(ticketId).get();
+                    const ticketAfter = ticketAfterSnap.data();
+                    let statusChangeHtml = '';
+
+                    // Verifica se o status mudou
+                    if (ticketAfter && ticketAfter.status !== ticketBefore.status) {
+                        statusChangeHtml = `<p>Além disso, o status do seu chamado foi alterado para: <b>${ticketAfter.status}</b>.</p>`;
                     }
+
+                    const subject = `Nova Resposta no seu Chamado: ${ticketBefore.title}`;
+                    const html = `<p>Olá, ${user.name}!</p>
+                                <p>Houve uma nova resposta no seu chamado "${ticketBefore.title}".</p>
+                                <p><b>Comentário de ${timelineEntry.userName}:</b></p>
+                                <blockquote style="border-left: 2px solid #ccc; padding-left: 1em; margin-left: 1em; font-style: italic;">
+                                    ${timelineEntry.message}
+                                </blockquote>
+                                ${statusChangeHtml}
+                                <p>Acesse o portal para mais detalhes.</p>`;
+                    sendNotificationEmail(user.email, subject, html);
                 }
             }
         }
@@ -259,11 +232,9 @@ app.post('/tickets/:id/internal-comments', async (req: Request, res: Response) =
             ...req.body,
             createdAt: Timestamp.now().toDate().toISOString(),
         };
-
         await db.collection('tickets').doc(ticketId).update({
             internalComments: FieldValue.arrayUnion(internalComment)
         });
-
         res.status(201).json(internalComment);
     } catch (error) {
         console.error("Erro ao adicionar comentário interno:", error);
@@ -272,132 +243,86 @@ app.post('/tickets/:id/internal-comments', async (req: Request, res: Response) =
 });
 
 // --- ROTAS DE CATEGORIAS (CRUD) ---
-
+// (O restante do código permanece o mesmo)
 app.get('/categories', async (req: Request, res: Response) => {
     try {
         const categoriesSnapshot = await db.collection('categories').where('isActive', '==', true).get();
         const categoriesList = categoriesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json(categoriesList);
-    } catch (error) {
-        console.error("Erro ao buscar categorias:", error);
-        res.status(500).send("Erro ao buscar categorias.");
-    }
+    } catch (error) { console.error("Erro ao buscar categorias:", error); res.status(500).send("Erro ao buscar categorias."); }
 });
-
 app.post('/categories', async (req: Request, res: Response) => {
     try {
-        const newCategory = {
-            ...req.body,
-            createdAt: Timestamp.now().toDate().toISOString(),
-        };
+        const newCategory = { ...req.body, createdAt: Timestamp.now().toDate().toISOString() };
         const docRef = await db.collection('categories').add(newCategory);
         res.status(201).json({ id: docRef.id, ...newCategory });
-    } catch (error) {
-        console.error("Erro ao criar categoria:", error);
-        res.status(500).send("Erro ao criar categoria.");
-    }
+    } catch (error) { console.error("Erro ao criar categoria:", error); res.status(500).send("Erro ao criar categoria."); }
 });
-
 app.put('/categories/:id', async (req: Request, res: Response) => {
     try {
         const categoryId = req.params.id;
         const categoryData = req.body;
         await db.collection('categories').doc(categoryId).update(categoryData);
         res.status(200).json({ id: categoryId, ...categoryData });
-    } catch (error) {
-        console.error("Erro ao atualizar categoria:", error);
-        res.status(500).send("Erro ao atualizar categoria.");
-    }
+    } catch (error) { console.error("Erro ao atualizar categoria:", error); res.status(500).send("Erro ao atualizar categoria."); }
 });
 
 // --- ROTAS DE CONFIGURAÇÃO DE SLA ---
-
 app.get('/sla-config', async (req: Request, res: Response) => {
     try {
         const slaSnapshot = await db.collection('slaConfig').get();
         const slaList = slaSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json(slaList);
-    } catch (error) {
-        console.error("Erro ao buscar configurações de SLA:", error);
-        res.status(500).send("Erro ao buscar configurações de SLA.");
-    }
+    } catch (error) { console.error("Erro ao buscar configurações de SLA:", error); res.status(500).send("Erro ao buscar configurações de SLA."); }
 });
-
 app.put('/sla-config/:id', async (req: Request, res: Response) => {
     try {
         const slaId = req.params.id;
         const slaData = req.body;
         await db.collection('slaConfig').doc(slaId).update(slaData);
         res.status(200).json({ id: slaId, ...slaData });
-    } catch (error) {
-        console.error("Erro ao atualizar SLA:", error);
-        res.status(500).send("Erro ao atualizar SLA.");
-    }
+    } catch (error) { console.error("Erro ao atualizar SLA:", error); res.status(500).send("Erro ao atualizar SLA."); }
 });
 
 // --- ROTAS DE CONFIGURAÇÕES GERAIS E DE E-MAIL ---
-const GENERAL_SETTINGS_DOC_ID = 'main';
-const EMAIL_SETTINGS_DOC_ID = 'main';
-
 app.get('/settings/general', async (req: Request, res: Response) => {
     try {
-        const doc = await db.collection('generalSettings').doc(GENERAL_SETTINGS_DOC_ID).get();
-        if (!doc.exists) {
-            return res.status(404).send('Configurações gerais não encontradas.');
-        }
+        const doc = await db.collection('generalSettings').doc('main').get();
+        if (!doc.exists) return res.status(404).send('Configurações gerais não encontradas.');
         res.status(200).json(doc.data());
-    } catch (error) {
-        res.status(500).send("Erro ao buscar configurações gerais.");
-    }
+    } catch (error) { res.status(500).send("Erro ao buscar configurações gerais."); }
 });
-
 app.post('/settings/general', async (req: Request, res: Response) => {
     try {
-        await db.collection('generalSettings').doc(GENERAL_SETTINGS_DOC_ID).set(req.body, { merge: true });
+        await db.collection('generalSettings').doc('main').set(req.body, { merge: true });
         res.status(200).json(req.body);
-    } catch (error) {
-        res.status(500).send("Erro ao salvar configurações gerais.");
-    }
+    } catch (error) { res.status(500).send("Erro ao salvar configurações gerais."); }
 });
-
 app.get('/settings/email', async (req: Request, res: Response) => {
     try {
-        const doc = await db.collection('emailSettings').doc(EMAIL_SETTINGS_DOC_ID).get();
-        if (!doc.exists) {
-            return res.status(404).send('Configurações de e-mail não encontradas.');
-        }
+        const doc = await db.collection('emailSettings').doc('main').get();
+        if (!doc.exists) return res.status(404).send('Configurações de e-mail não encontradas.');
         res.status(200).json(doc.data());
-    } catch (error) {
-        res.status(500).send("Erro ao buscar configurações de e-mail.");
-    }
+    } catch (error) { res.status(500).send("Erro ao buscar configurações de e-mail."); }
 });
-
 app.post('/settings/email', async (req: Request, res: Response) => {
     try {
-        await db.collection('emailSettings').doc(EMAIL_SETTINGS_DOC_ID).set(req.body, { merge: true });
+        await db.collection('emailSettings').doc('main').set(req.body, { merge: true });
         res.status(200).json(req.body);
-    } catch (error) {
-        res.status(500).send("Erro ao salvar configurações de e-mail.");
-    }
+    } catch (error) { res.status(500).send("Erro ao salvar configurações de e-mail."); }
 });
 
 // Rota de teste de e-mail
 app.post('/send-test-email', async (req: Request, res: Response) => {
     try {
         const { to } = req.body;
-        const subject = 'E-mail de Teste do Helpdesk';
-        const html = '<p>Este é um e-mail de teste para verificar as suas configurações de SMTP.</p>';
-        
-        // A função sendNotificationEmail já faz toda a lógica de buscar settings e enviar
-        await sendNotificationEmail(to, subject, html);
-
+        await sendNotificationEmail(to, 'E-mail de Teste do Helpdesk', '<p>Este é um e-mail de teste.</p>');
         res.status(200).send('E-mail de teste enviado com sucesso!');
     } catch (error: any) {
         console.error("Erro ao enviar e-mail de teste:", error);
         res.status(500).send(`Erro ao enviar e-mail de teste: ${error.message}`);
     }
 });
-
 
 app.listen(port, () => {
   console.log(`🚀 Servidor backend rodando em http://localhost:${port}`);
