@@ -1,6 +1,4 @@
 import dotenv from 'dotenv';
-import { v2 as cloudinary } from 'cloudinary';
-import multer from 'multer';
 dotenv.config(); // Carrega as variáveis de ambiente primeiro
 
 import express, { Request, Response } from 'express';
@@ -8,6 +6,8 @@ import cors from 'cors';
 import { db } from './config/firebase';
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer'; // Importar o nodemailer
+import { v2 as cloudinary } from 'cloudinary';
+import multer from 'multer';
 
 
 // Configuração do Cloudinary
@@ -173,7 +173,6 @@ app.put('/tickets/:id', async (req: Request, res: Response) => {
             updatedAt: Timestamp.now().toDate().toISOString(),
         };
         await db.collection('tickets').doc(ticketId).update(ticketData);
-        // LÓGICA DE E-MAIL REMOVIDA DAQUI PARA EVITAR DUPLICIDADE
         res.status(200).json({ id: ticketId, ...ticketData });
     } catch (error) {
         console.error("Erro ao atualizar ticket:", error);
@@ -185,7 +184,6 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
     try {
         const ticketId = req.params.id;
         
-        // Buscar o estado anterior do ticket para comparar
         const ticketBeforeSnap = await db.collection('tickets').doc(ticketId).get();
         if (!ticketBeforeSnap.exists) return res.status(404).send("Chamado não encontrado.");
         const ticketBefore = ticketBeforeSnap.data();
@@ -201,7 +199,6 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
         });
         res.status(201).json(timelineEntry);
 
-        // --- LÓGICA DE E-MAIL CENTRALIZADA PARA USUÁRIO ---
         if (ticketBefore) {
             const userSnap = await db.collection('users').doc(ticketBefore.userId).get();
             if (userSnap.exists) {
@@ -211,7 +208,6 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
                     const ticketAfter = ticketAfterSnap.data();
                     let statusChangeHtml = '';
 
-                    // Verifica se o status mudou
                     if (ticketAfter && ticketAfter.status !== ticketBefore.status) {
                         statusChangeHtml = `<p>Além disso, o status do seu chamado foi alterado para: <b>${ticketAfter.status}</b>.</p>`;
                     }
@@ -229,7 +225,6 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
                 }
             }
         }
-        // --- FIM DA LÓGICA DE E-MAIL ---
 
     } catch (error) {
         console.error("Erro ao adicionar entrada na timeline:", error);
@@ -256,7 +251,6 @@ app.post('/tickets/:id/internal-comments', async (req: Request, res: Response) =
 });
 
 // --- ROTAS DE CATEGORIAS (CRUD) ---
-// (O restante do código permanece o mesmo)
 app.get('/categories', async (req: Request, res: Response) => {
     try {
         const categoriesSnapshot = await db.collection('categories').where('isActive', '==', true).get();
@@ -337,22 +331,23 @@ app.post('/send-test-email', async (req: Request, res: Response) => {
     }
 });
 
+
 // --- ROTA PARA UPLOAD DE FICHEIROS ---
 app.post('/upload', upload.single('file'), (req: Request, res: Response) => {
     if (!req.file) {
         return res.status(400).send('Nenhum ficheiro enviado.');
     }
 
-    // Enviar o ficheiro do buffer de memória para o Cloudinary
+    // A correção está aqui: usamos o '!' para dizer ao TypeScript que temos a certeza que req.file existe.
     cloudinary.uploader.upload_stream({ resource_type: 'auto' }, (error, result) => {
         if (error || !result) {
             console.error("Erro no upload para o Cloudinary:", error);
             return res.status(500).send('Erro ao fazer upload do ficheiro.');
         }
-        // Enviar de volta a URL segura e o nome original do ficheiro
-        res.status(200).json({ url: result.secure_url, name: req.file.originalname });
+        res.status(200).json({ url: result.secure_url, name: req.file!.originalname });
     }).end(req.file.buffer);
 });
+
 
 app.listen(port, () => {
   console.log(`🚀 Servidor backend rodando em http://localhost:${port}`);
