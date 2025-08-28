@@ -1,17 +1,54 @@
 import dotenv from 'dotenv';
-import nodemailer from 'nodemailer';
 dotenv.config(); // Carrega as variáveis de ambiente primeiro
 
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { db } from './config/firebase';
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
+import nodemailer from 'nodemailer'; // Importar o nodemailer
 
 const app = express();
 const port = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+// --- FUNÇÃO REUTILIZÁVEL PARA ENVIAR E-MAILS ---
+async function sendNotificationEmail(to: string, subject: string, html: string) {
+    try {
+        const emailSettingsDoc = await db.collection('emailSettings').doc('main').get();
+        if (!emailSettingsDoc.exists) {
+            throw new Error('Configurações de e-mail não encontradas.');
+        }
+        const settings = emailSettingsDoc.data();
+
+        if (!settings || !settings.smtpUser || !settings.smtpPassword) {
+             throw new Error('Usuário ou senha do SMTP não configurados.');
+        }
+
+        const transporter = nodemailer.createTransport({
+            host: settings.smtpServer,
+            port: settings.smtpPort,
+            secure: settings.smtpPort === 465,
+            auth: {
+                user: settings.smtpUser,
+                pass: settings.smtpPassword, // Senha de App
+            },
+        });
+
+        await transporter.sendMail({
+            from: `"Helpdesk Pro" <${settings.smtpUser}>`,
+            to,
+            subject,
+            html,
+        });
+        console.log(`E-mail de notificação enviado para: ${to}`);
+    } catch (error) {
+        console.error(`Falha ao enviar e-mail para ${to}:`, error);
+        // Não retorna um erro para a requisição principal não falhar
+    }
+}
+
 
 // --- ROTAS DE AUTENTICAÇÃO ---
 
@@ -94,15 +131,36 @@ app.get('/tickets', async (req: Request, res: Response) => {
 
 app.post('/tickets', async (req: Request, res: Response) => {
     try {
-        const newTicket = {
+        const newTicketData = {
             ...req.body,
             createdAt: Timestamp.now().toDate().toISOString(),
             updatedAt: Timestamp.now().toDate().toISOString(),
-            timeline: [], // Inicializa campos como arrays vazios
+            timeline: [],
             internalComments: []
         };
-        const docRef = await db.collection('tickets').add(newTicket);
-        res.status(201).json({ id: docRef.id, ...newTicket });
+        const docRef = await db.collection('tickets').add(newTicketData);
+        const newTicket = { id: docRef.id, ...newTicketData };
+        res.status(201).json(newTicket);
+
+        // --- LÓGICA DE E-MAIL PARA TÉCNICOS ---
+        console.log('Iniciando envio de e-mail para técnicos...');
+        const techsSnapshot = await db.collection('users').where('role', '==', 'technician').get();
+        if (!techsSnapshot.empty) {
+            const subject = `Novo Chamado Aberto: ${newTicket.title}`;
+            const html = `<p>Um novo chamado foi aberto no sistema de Helpdesk.</p>
+                        <p><b>Título:</b> ${newTicket.title}</p>
+                        <p><b>Prioridade:</b> ${newTicket.priority}</p>
+                        <p>Por favor, verifique o painel para mais detalhes.</p>`;
+            
+            techsSnapshot.forEach(doc => {
+                const tech = doc.data();
+                if (tech.email) {
+                    sendNotificationEmail(tech.email, subject, html);
+                }
+            });
+        }
+        // --- FIM DA LÓGICA DE E-MAIL ---
+
     } catch (error) {
         console.error("Erro ao criar ticket:", error);
         res.status(500).send("Erro ao criar ticket.");
@@ -112,12 +170,38 @@ app.post('/tickets', async (req: Request, res: Response) => {
 app.put('/tickets/:id', async (req: Request, res: Response) => {
     try {
         const ticketId = req.params.id;
+        
+        // Buscar o estado anterior do ticket para comparar
+        const ticketBeforeSnap = await db.collection('tickets').doc(ticketId).get();
+        if (!ticketBeforeSnap.exists) {
+            return res.status(404).send("Chamado não encontrado.");
+        }
+        const ticketBefore = ticketBeforeSnap.data();
+
         const ticketData = {
             ...req.body,
             updatedAt: Timestamp.now().toDate().toISOString(),
         };
         await db.collection('tickets').doc(ticketId).update(ticketData);
         res.status(200).json({ id: ticketId, ...ticketData });
+        
+        // --- LÓGICA DE E-MAIL PARA USUÁRIO (MUDANÇA DE STATUS) ---
+        if (ticketBefore && ticketData.status !== ticketBefore.status) {
+            console.log(`Status do chamado ${ticketId} alterado. Enviando e-mail...`);
+            const userSnap = await db.collection('users').doc(ticketBefore.userId).get();
+            if (userSnap.exists) {
+                const user = userSnap.data();
+                if (user && user.email) {
+                    const subject = `Atualização no seu Chamado: ${ticketBefore.title}`;
+                    const html = `<p>Olá, ${user.name}!</p>
+                                <p>O status do seu chamado "${ticketBefore.title}" foi alterado para: <b>${ticketData.status}</b>.</p>
+                                <p>Acesse o portal para mais detalhes.</p>`;
+                    sendNotificationEmail(user.email, subject, html);
+                }
+            }
+        }
+        // --- FIM DA LÓGICA DE E-MAIL ---
+
     } catch (error) {
         console.error("Erro ao atualizar ticket:", error);
         res.status(500).send("Erro ao atualizar ticket.");
@@ -128,7 +212,7 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
     try {
         const ticketId = req.params.id;
         const timelineEntry = {
-            id: Math.random().toString(36).substring(7), // ID aleatório simples
+            id: Math.random().toString(36).substring(7),
             ...req.body,
             createdAt: Timestamp.now().toDate().toISOString(),
         };
@@ -136,8 +220,31 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
         await db.collection('tickets').doc(ticketId).update({
             timeline: FieldValue.arrayUnion(timelineEntry)
         });
-
         res.status(201).json(timelineEntry);
+
+        // --- LÓGICA DE E-MAIL PARA USUÁRIO (NOVO COMENTÁRIO) ---
+        console.log(`Novo comentário no chamado ${ticketId}. Enviando e-mail...`);
+        const ticketSnap = await db.collection('tickets').doc(ticketId).get();
+        if (ticketSnap.exists) {
+            const ticket = ticketSnap.data();
+            if (ticket) {
+                const userSnap = await db.collection('users').doc(ticket.userId).get();
+                 if (userSnap.exists) {
+                    const user = userSnap.data();
+                    if (user && user.email) {
+                        const subject = `Nova Resposta no seu Chamado: ${ticket.title}`;
+                        const html = `<p>Olá, ${user.name}!</p>
+                                    <p>Houve uma nova resposta no seu chamado "${ticket.title}".</p>
+                                    <p><b>Comentário de ${timelineEntry.userName}:</b></p>
+                                    <p><i>"${timelineEntry.message}"</i></p>
+                                    <p>Acesse o portal para responder.</p>`;
+                        sendNotificationEmail(user.email, subject, html);
+                    }
+                }
+            }
+        }
+        // --- FIM DA LÓGICA DE E-MAIL ---
+
     } catch (error) {
         console.error("Erro ao adicionar entrada na timeline:", error);
         res.status(500).send("Erro ao adicionar entrada na timeline.");
@@ -148,7 +255,7 @@ app.post('/tickets/:id/internal-comments', async (req: Request, res: Response) =
     try {
         const ticketId = req.params.id;
         const internalComment = {
-            id: Math.random().toString(36).substring(7), // ID aleatório simples
+            id: Math.random().toString(36).substring(7),
             ...req.body,
             createdAt: Timestamp.now().toDate().toISOString(),
         };
@@ -274,40 +381,20 @@ app.post('/settings/email', async (req: Request, res: Response) => {
     }
 });
 
+// Rota de teste de e-mail
 app.post('/send-test-email', async (req: Request, res: Response) => {
     try {
-        const emailSettingsDoc = await db.collection('emailSettings').doc('main').get();
-        if (!emailSettingsDoc.exists) {
-            return res.status(404).send('Configurações de e-mail não encontradas.');
-        }
-        const settings = emailSettingsDoc.data();
-
-        if (!settings || !settings.smtpUser || !settings.smtpPassword) {
-             return res.status(400).send('Usuário ou senha do SMTP não configurados.');
-        }
-
-        const transporter = nodemailer.createTransport({
-            host: settings.smtpServer,
-            port: settings.smtpPort,
-            secure: settings.smtpPort === 465, // true for 465, false for other ports
-            auth: {
-                user: settings.smtpUser,
-                pass: settings.smtpPassword, // Use a senha de app aqui
-            },
-        });
-
-        await transporter.sendMail({
-            from: `"Helpdesk" <${settings.smtpUser}>`,
-            to: req.body.to, // O e-mail de destino virá do corpo da requisição
-            subject: 'Novo Chamado Criado',
-            text: 'Olá! Um novo chamado foi aberto no sistema de Helpdesk.',
-            html: '<b>Olá!</b><p>Um novo chamado foi aberto no sistema de Helpdesk.</p>',
-        });
+        const { to } = req.body;
+        const subject = 'E-mail de Teste do Helpdesk';
+        const html = '<p>Este é um e-mail de teste para verificar as suas configurações de SMTP.</p>';
+        
+        // A função sendNotificationEmail já faz toda a lógica de buscar settings e enviar
+        await sendNotificationEmail(to, subject, html);
 
         res.status(200).send('E-mail de teste enviado com sucesso!');
-    } catch (error) {
-        console.error("Erro ao enviar e-mail:", error);
-        res.status(500).send("Erro ao enviar e-mail.");
+    } catch (error: any) {
+        console.error("Erro ao enviar e-mail de teste:", error);
+        res.status(500).send(`Erro ao enviar e-mail de teste: ${error.message}`);
     }
 });
 
