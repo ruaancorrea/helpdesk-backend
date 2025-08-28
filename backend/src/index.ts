@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 dotenv.config(); // Carrega as variáveis de ambiente primeiro
 
 import express, { Request, Response } from 'express';
@@ -270,6 +271,43 @@ app.post('/settings/email', async (req: Request, res: Response) => {
         res.status(200).json(req.body);
     } catch (error) {
         res.status(500).send("Erro ao salvar configurações de e-mail.");
+    }
+});
+
+app.post('/send-test-email', async (req: Request, res: Response) => {
+    try {
+        const emailSettingsDoc = await db.collection('emailSettings').doc('main').get();
+        if (!emailSettingsDoc.exists) {
+            return res.status(404).send('Configurações de e-mail não encontradas.');
+        }
+        const settings = emailSettingsDoc.data();
+
+        if (!settings || !settings.smtpUser || !settings.smtpPassword) {
+             return res.status(400).send('Usuário ou senha do SMTP não configurados.');
+        }
+
+        const transporter = nodemailer.createTransport({
+            host: settings.smtpServer,
+            port: settings.smtpPort,
+            secure: settings.smtpPort === 465, // true for 465, false for other ports
+            auth: {
+                user: settings.smtpUser,
+                pass: settings.smtpPassword, // Use a senha de app aqui
+            },
+        });
+
+        await transporter.sendMail({
+            from: `"Helpdesk" <${settings.smtpUser}>`,
+            to: req.body.to, // O e-mail de destino virá do corpo da requisição
+            subject: 'Novo Chamado Criado',
+            text: 'Olá! Um novo chamado foi aberto no sistema de Helpdesk.',
+            html: '<b>Olá!</b><p>Um novo chamado foi aberto no sistema de Helpdesk.</p>',
+        });
+
+        res.status(200).send('E-mail de teste enviado com sucesso!');
+    } catch (error) {
+        console.error("Erro ao enviar e-mail:", error);
+        res.status(500).send("Erro ao enviar e-mail.");
     }
 });
 
