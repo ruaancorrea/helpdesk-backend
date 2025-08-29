@@ -85,15 +85,16 @@ app.post('/login', async (req: Request, res: Response) => {
 
 
 // --- ROTAS DE USUÁRIOS (CRUD) ---
+
 app.get('/users', async (req: Request, res: Response) => {
-  try {
-    const usersSnapshot = await db.collection('users').get();
-    const usersList = usersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.status(200).json(usersList);
-  } catch (error) {
-    console.error("Erro ao buscar usuários:", error);
-    res.status(500).send("Erro ao buscar usuários no servidor.");
-  }
+    try {
+        const usersSnapshot = await db.collection('users').get();
+        const usersList = usersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        res.status(200).json(usersList);
+    } catch (error) {
+        console.error("Erro ao buscar usuários:", error);
+        res.status(500).send("Erro ao buscar usuários no servidor.");
+    }
 });
 
 app.post('/users', async (req: Request, res: Response) => {
@@ -120,6 +121,7 @@ app.put('/users/:id', async (req: Request, res: Response) => {
 });
 
 
+
 // --- ROTAS DE TICKETS (CRUD) ---
 app.get('/tickets', async (req: Request, res: Response) => {
     try {
@@ -133,10 +135,23 @@ app.get('/tickets', async (req: Request, res: Response) => {
 });
 
 
-// --- NOVA ROTA PARA CRIAR USUÁRIOS EM MASSA ---
-app.post('/users/bulk', async (req: Request, res: Response) => {
-    const usersToCreate = req.body.users; // Espera um array de usuários
+// --- NOVA ROTA PARA APAGAR USUÁRIOS ---
+app.delete('/users/:id', async (req: Request, res: Response) => {
+    try {
+        const userId = req.params.id;
+        await db.collection('users').doc(userId).delete();
+        res.status(200).send(`Usuário ${userId} apagado com sucesso.`);
+    } catch (error) {
+        console.error("Erro ao apagar usuário:", error);
+        res.status(500).send("Erro ao apagar usuário.");
+    }
+});
 
+
+
+// --- ROTA DE BULK ATUALIZADA ---
+app.post('/users/bulk', async (req: Request, res: Response) => {
+    const usersToCreate = req.body.users;
     if (!Array.isArray(usersToCreate) || usersToCreate.length === 0) {
         return res.status(400).send('Por favor, envie uma lista de usuários válida.');
     }
@@ -147,29 +162,37 @@ app.post('/users/bulk', async (req: Request, res: Response) => {
         let createdCount = 0;
 
         usersToCreate.forEach(user => {
+            if (!user.Nome || !user.Email || !user.Senha) return;
+
+            const role = String(user.Papel).toLowerCase() === 'admin' ? 'admin' : 'user';
+
             const newUser = {
-                name: user.Nome, // Mapeia os nomes da planilha
+                name: user.Nome,
                 email: user.Email,
-                department: user.Departamento,
-                password: user.Senha,
-                role: 'user', // Define um papel padrão
+                department: user.Departamento || 'Não especificado',
+                password: String(user.Senha),
+                role: role, // Papel vem da planilha ou é 'user' por padrão
+                position: role === 'admin' ? 'Administrador' : 'Usuário',
+                phone: '',
                 createdAt: Timestamp.now().toDate().toISOString(),
             };
-            // Adiciona uma nova operação de criação ao lote
-            const docRef = usersRef.doc(); // Cria um novo documento com ID automático
+
+            const docRef = usersRef.doc();
             batch.set(docRef, newUser);
             createdCount++;
         });
 
-        await batch.commit(); // Executa todas as operações de criação de uma só vez
+        if (createdCount === 0) {
+            return res.status(400).send('Nenhum usuário válido para criar.');
+        }
 
+        await batch.commit();
         res.status(201).send(`${createdCount} usuários criados com sucesso!`);
     } catch (error) {
         console.error("Erro ao criar usuários em massa:", error);
         res.status(500).send("Erro ao processar a planilha.");
     }
 });
-
 
 
 // --- NOVA ROTA PARA APAGAR TICKETS (APENAS ADMIN) ---
