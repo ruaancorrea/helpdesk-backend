@@ -132,6 +132,46 @@ app.get('/tickets', async (req: Request, res: Response) => {
     }
 });
 
+
+// --- NOVA ROTA PARA CRIAR USUÁRIOS EM MASSA ---
+app.post('/users/bulk', async (req: Request, res: Response) => {
+    const usersToCreate = req.body.users; // Espera um array de usuários
+
+    if (!Array.isArray(usersToCreate) || usersToCreate.length === 0) {
+        return res.status(400).send('Por favor, envie uma lista de usuários válida.');
+    }
+
+    try {
+        const batch = db.batch();
+        const usersRef = db.collection('users');
+        let createdCount = 0;
+
+        usersToCreate.forEach(user => {
+            const newUser = {
+                name: user.Nome, // Mapeia os nomes da planilha
+                email: user.Email,
+                department: user.Departamento,
+                password: user.Senha,
+                role: 'user', // Define um papel padrão
+                createdAt: Timestamp.now().toDate().toISOString(),
+            };
+            // Adiciona uma nova operação de criação ao lote
+            const docRef = usersRef.doc(); // Cria um novo documento com ID automático
+            batch.set(docRef, newUser);
+            createdCount++;
+        });
+
+        await batch.commit(); // Executa todas as operações de criação de uma só vez
+
+        res.status(201).send(`${createdCount} usuários criados com sucesso!`);
+    } catch (error) {
+        console.error("Erro ao criar usuários em massa:", error);
+        res.status(500).send("Erro ao processar a planilha.");
+    }
+});
+
+
+
 // --- NOVA ROTA PARA APAGAR TICKETS (APENAS ADMIN) ---
 app.delete('/tickets/:id', async (req: Request, res: Response) => {
     try {
