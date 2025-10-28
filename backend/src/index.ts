@@ -43,6 +43,7 @@ async function sendNotificationEmail(to: string, subject: string, html: string) 
             host: settings.smtpServer,
             port: settings.smtpPort,
             secure: settings.smtpPort === 465,
+	    requireTLS: true, // <-- ADICIONE ESTA LINHA
             auth: {
                 user: settings.smtpUser,
                 pass: settings.smtpPassword, // Senha de App
