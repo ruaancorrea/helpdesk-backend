@@ -5,16 +5,16 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { db } from './config/firebase';
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
-import nodemailer from 'nodemailer'; // Importar o nodemailer
+// import nodemailer from 'nodemailer'; // <-- REMOVIDO
+import { Resend } from 'resend'; // <-- ADICIONADO
 import { v2 as cloudinary } from 'cloudinary';
 import multer from 'multer';
 
-
 // Configuração do Cloudinary
-cloudinary.config({ 
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
-  api_key: process.env.CLOUDINARY_API_KEY, 
-  api_secret: process.env.CLOUDINARY_API_SECRET 
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
 // Configuração do Multer para guardar o ficheiro temporariamente em memória
@@ -26,39 +26,51 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// --- FUNÇÃO REUTILIZÁVEL PARA ENVIAR E-MAILS ---
+// --- INICIALIZAÇÃO DO RESEND ---
+// Pega a chave da API das variáveis de ambiente (configuradas na Railway/Render)
+const resend = new Resend(process.env.RESEND_API_KEY); // <-- ADICIONADO
+
+// --- FUNÇÃO REUTILIZÁVEL PARA ENVIAR E-MAILS (ATUALIZADA PARA RESEND) ---
 async function sendNotificationEmail(to: string, subject: string, html: string) {
+    // Verifica se a chave da API foi configurada no ambiente
+    if (!process.env.RESEND_API_KEY) {
+        console.error('ERRO CRÍTICO: Chave da API RESEND_API_KEY não definida nas variáveis de ambiente.');
+        // Pode lançar um erro ou retornar para evitar mais processamento
+        // throw new Error('Chave da API Resend não configurada.');
+        return; // Não tenta enviar se a chave não existe
+    }
+
+    // Define o remetente usando o domínio padrão do Resend
+    // Mude 'Helpdesk NTW Socium' para o nome que deseja que apareça
+    const fromAddress = 'Helpdesk NTW Socium <onboarding@resend.dev>';
+
     try {
-        const emailSettingsDoc = await db.collection('emailSettings').doc('main').get();
-        if (!emailSettingsDoc.exists) {
-            throw new Error('Configurações de e-mail não encontradas.');
-        }
-        const settings = emailSettingsDoc.data();
+        console.log(`Tentando enviar e-mail para ${to} com assunto "${subject}" via Resend...`);
 
-        if (!settings || !settings.smtpUser || !settings.smtpPassword) {
-             throw new Error('Usuário ou senha do SMTP não configurados.');
-        }
-
-        const transporter = nodemailer.createTransport({
-            host: settings.smtpServer,
-            port: settings.smtpPort,
-            secure: settings.smtpPort === 465,
-	    requireTLS: true, // <-- ADICIONE ESTA LINHA
-            auth: {
-                user: settings.smtpUser,
-                pass: settings.smtpPassword, // Senha de App
-            },
+        const { data, error } = await resend.emails.send({
+            from: fromAddress,
+            to: [to], // Resend espera um array de e-mails
+            subject: subject,
+            html: html,
+            replyTo: 'helpdesk@ntwsocium.com.br' // <-- Respostas irão para este e-mail
         });
 
-        await transporter.sendMail({
-            from: `"Helpdesk Pro" <${settings.smtpUser}>`,
-            to,
-            subject,
-            html,
-        });
-        console.log(`E-mail de notificação enviado para: ${to}`);
-    } catch (error) {
-        console.error(`Falha ao enviar e-mail para ${to}:`, error);
+        // Verifica se houve erro na resposta da API Resend
+        if (error) {
+            console.error(`Falha ao enviar e-mail para ${to} via Resend:`, error);
+            // Decide se quer lançar o erro para a rota que chamou a função saber
+            // throw error;
+            return; // Ou apenas sai da função
+        }
+
+        // Se chegou aqui, o envio foi bem-sucedido (ou ao menos aceito pela API)
+        console.log(`E-mail de notificação enviado para: ${to} via Resend. ID: ${data?.id}`);
+
+    } catch (catchedError) {
+        // Captura erros gerais (problemas de rede, etc.)
+        console.error(`Exceção capturada ao tentar enviar e-mail para ${to} via Resend:`, catchedError);
+        // Decide se quer lançar o erro
+        // throw catchedError;
     }
 }
 
@@ -121,22 +133,6 @@ app.put('/users/:id', async (req: Request, res: Response) => {
     }
 });
 
-
-
-// --- ROTAS DE TICKETS (CRUD) ---
-app.get('/tickets', async (req: Request, res: Response) => {
-    try {
-        const ticketsSnapshot = await db.collection('tickets').get();
-        const ticketsList = ticketsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        res.status(200).json(ticketsList);
-    } catch (error) {
-        console.error("Erro ao buscar tickets:", error);
-        res.status(500).send("Erro ao buscar tickets.");
-    }
-});
-
-
-// --- NOVA ROTA PARA APAGAR USUÁRIOS ---
 app.delete('/users/:id', async (req: Request, res: Response) => {
     try {
         const userId = req.params.id;
@@ -148,9 +144,7 @@ app.delete('/users/:id', async (req: Request, res: Response) => {
     }
 });
 
-
-
-// --- ROTA DE BULK ATUALIZADA ---
+// --- ROTA DE BULK USUÁRIOS ---
 app.post('/users/bulk', async (req: Request, res: Response) => {
     const usersToCreate = req.body.users;
     if (!Array.isArray(usersToCreate) || usersToCreate.length === 0) {
@@ -163,22 +157,25 @@ app.post('/users/bulk', async (req: Request, res: Response) => {
         let createdCount = 0;
 
         usersToCreate.forEach(user => {
+            // Adapte os nomes das colunas conforme sua planilha
             if (!user.Nome || !user.Email || !user.Senha) return;
 
-            const role = String(user.Papel).toLowerCase() === 'admin' ? 'admin' : 'user';
+            const role = String(user.Papel).toLowerCase() === 'admin' ? 'admin'
+                       : String(user.Papel).toLowerCase() === 'technician' ? 'technician'
+                       : 'user';
 
             const newUser = {
                 name: user.Nome,
                 email: user.Email,
                 department: user.Departamento || 'Não especificado',
-                password: String(user.Senha),
-                role: role, // Papel vem da planilha ou é 'user' por padrão
-                position: role === 'admin' ? 'Administrador' : 'Usuário',
-                phone: '',
+                password: String(user.Senha), // Certifique-se de que a senha seja string
+                role: role,
+                position: user.Cargo || (role === 'admin' ? 'Administrador' : role === 'technician' ? 'Técnico' : 'Usuário'),
+                phone: user.Telefone || '',
                 createdAt: Timestamp.now().toDate().toISOString(),
             };
 
-            const docRef = usersRef.doc();
+            const docRef = usersRef.doc(); // Cria um novo doc com ID automático
             batch.set(docRef, newUser);
             createdCount++;
         });
@@ -196,24 +193,17 @@ app.post('/users/bulk', async (req: Request, res: Response) => {
 });
 
 
-// --- NOVA ROTA PARA APAGAR TICKETS (APENAS ADMIN) ---
-app.delete('/tickets/:id', async (req: Request, res: Response) => {
+// --- ROTAS DE TICKETS (CRUD) ---
+app.get('/tickets', async (req: Request, res: Response) => {
     try {
-        const ticketId = req.params.id;
-
-        // No futuro, seria bom adicionar uma verificação aqui para garantir que quem chama é um admin.
-        // Por agora, a segurança está no frontend, que só mostra o botão para o admin.
-
-        await db.collection('tickets').doc(ticketId).delete();
-
-        res.status(200).send(`Ticket ${ticketId} apagado com sucesso.`);
+        const ticketsSnapshot = await db.collection('tickets').get();
+        const ticketsList = ticketsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        res.status(200).json(ticketsList);
     } catch (error) {
-        console.error("Erro ao apagar ticket:", error);
-        res.status(500).send("Erro ao apagar ticket.");
+        console.error("Erro ao buscar tickets:", error);
+        res.status(500).send("Erro ao buscar tickets.");
     }
 });
-
-
 
 app.post('/tickets', async (req: Request, res: Response) => {
     try {
@@ -221,32 +211,50 @@ app.post('/tickets', async (req: Request, res: Response) => {
             ...req.body,
             createdAt: Timestamp.now().toDate().toISOString(),
             updatedAt: Timestamp.now().toDate().toISOString(),
-            timeline: [],
-            internalComments: []
+            timeline: [], // Inicializa vazio
+            internalComments: [] // Inicializa vazio
         };
         const docRef = await db.collection('tickets').add(newTicketData);
         const newTicket = { id: docRef.id, ...newTicketData };
-        res.status(201).json(newTicket);
+        res.status(201).json(newTicket); // Responde primeiro
 
-        // Notificar técnicos sobre novo chamado
+        // Tenta enviar e-mails de notificação depois
         console.log('Iniciando envio de e-mail para técnicos...');
         const techsSnapshot = await db.collection('users').where('role', '==', 'technician').get();
         if (!techsSnapshot.empty) {
             const subject = `Novo Chamado Aberto: ${newTicket.title}`;
             const html = `<p>Um novo chamado foi aberto no sistema de Helpdesk.</p>
-                        <p><b>Título:</b> ${newTicket.title}</p>
-                        <p><b>Prioridade:</b> ${newTicket.priority}</p>
-                        <p>Por favor, verifique o painel para mais detalhes.</p>`;
+                          <p><b>Título:</b> ${newTicket.title}</p>
+                          <p><b>Prioridade:</b> ${newTicket.priority}</p>
+                          <p>Por favor, verifique o painel para mais detalhes.</p>`;
+            const emailPromises: Promise<void>[] = []; // Cria array para promessas
             techsSnapshot.forEach(doc => {
                 const tech = doc.data();
-                if (tech.email) sendNotificationEmail(tech.email, subject, html);
+                if (tech.email) {
+                    // Adiciona a promessa de envio ao array
+                    emailPromises.push(sendNotificationEmail(tech.email, subject, html));
+                }
+            });
+            // Espera todas as tentativas de envio concluírem (sem bloquear a resposta principal)
+            Promise.allSettled(emailPromises).then(results => {
+                console.log('Tentativas de envio de e-mail para técnicos concluídas.');
+                results.forEach((result, index) => {
+                    if (result.status === 'rejected') {
+                        // Loga erros individuais se houver falha no envio para algum técnico
+                        console.error(`Falha ao enviar e-mail para técnico ${index}:`, result.reason);
+                    }
+                });
             });
         }
     } catch (error) {
         console.error("Erro ao criar ticket:", error);
-        res.status(500).send("Erro ao criar ticket.");
+        // Garante que uma resposta seja enviada mesmo se o envio de email falhar antes
+        if (!res.headersSent) {
+            res.status(500).send("Erro ao criar ticket.");
+        }
     }
 });
+
 
 app.put('/tickets/:id', async (req: Request, res: Response) => {
     try {
@@ -263,10 +271,24 @@ app.put('/tickets/:id', async (req: Request, res: Response) => {
     }
 });
 
+app.delete('/tickets/:id', async (req: Request, res: Response) => {
+    try {
+        const ticketId = req.params.id;
+        // Adicionar verificação de permissão (ex: admin) aqui se necessário
+        await db.collection('tickets').doc(ticketId).delete();
+        res.status(200).send(`Ticket ${ticketId} apagado com sucesso.`);
+    } catch (error) {
+        console.error("Erro ao apagar ticket:", error);
+        res.status(500).send("Erro ao apagar ticket.");
+    }
+});
+
+
+// --- ROTAS DE TIMELINE E COMENTÁRIOS INTERNOS ---
 app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
     try {
         const ticketId = req.params.id;
-        
+
         const ticketBeforeSnap = await db.collection('tickets').doc(ticketId).get();
         if (!ticketBeforeSnap.exists) return res.status(404).send("Chamado não encontrado.");
         const ticketBefore = ticketBeforeSnap.data();
@@ -280,30 +302,33 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
         await db.collection('tickets').doc(ticketId).update({
             timeline: FieldValue.arrayUnion(timelineEntry)
         });
-        res.status(201).json(timelineEntry);
+        res.status(201).json(timelineEntry); // Responde primeiro
 
+        // Tenta enviar notificação por e-mail depois
         if (ticketBefore) {
             const userSnap = await db.collection('users').doc(ticketBefore.userId).get();
             if (userSnap.exists) {
                 const user = userSnap.data();
                 if (user && user.email) {
-                    const ticketAfterSnap = await db.collection('tickets').doc(ticketId).get();
+                    const ticketAfterSnap = await db.collection('tickets').doc(ticketId).get(); // Pega o estado atualizado
                     const ticketAfter = ticketAfterSnap.data();
                     let statusChangeHtml = '';
 
-                    if (ticketAfter && ticketAfter.status !== ticketBefore.status) {
+                    // Compara status antes e depois da atualização da timeline (pode ter sido atualizado junto)
+                    if (ticketAfter && ticketBefore.status !== ticketAfter.status) {
                         statusChangeHtml = `<p>Além disso, o status do seu chamado foi alterado para: <b>${ticketAfter.status}</b>.</p>`;
                     }
 
                     const subject = `Nova Resposta no seu Chamado: ${ticketBefore.title}`;
                     const html = `<p>Olá, ${user.name}!</p>
-                                <p>Houve uma nova resposta no seu chamado "${ticketBefore.title}".</p>
-                                <p><b>Comentário de ${timelineEntry.userName}:</b></p>
-                                <blockquote style="border-left: 2px solid #ccc; padding-left: 1em; margin-left: 1em; font-style: italic;">
+                                  <p>Houve uma nova resposta no seu chamado "${ticketBefore.title}".</p>
+                                  <p><b>Comentário de ${timelineEntry.userName}:</b></p>
+                                  <blockquote style="border-left: 2px solid #ccc; padding-left: 1em; margin-left: 1em; font-style: italic;">
                                     ${timelineEntry.message}
-                                </blockquote>
-                                ${statusChangeHtml}
-                                <p>Acesse o portal para mais detalhes.</p>`;
+                                  </blockquote>
+                                  ${statusChangeHtml}
+                                  <p>Acesse o portal para mais detalhes.</p>`;
+                    // Envia o e-mail sem esperar (não bloqueia a resposta)
                     sendNotificationEmail(user.email, subject, html);
                 }
             }
@@ -311,9 +336,12 @@ app.post('/tickets/:id/timeline', async (req: Request, res: Response) => {
 
     } catch (error) {
         console.error("Erro ao adicionar entrada na timeline:", error);
-        res.status(500).send("Erro ao adicionar entrada na timeline.");
+        if (!res.headersSent) {
+            res.status(500).send("Erro ao adicionar entrada na timeline.");
+        }
     }
 });
+
 
 app.post('/tickets/:id/internal-comments', async (req: Request, res: Response) => {
     try {
@@ -332,6 +360,7 @@ app.post('/tickets/:id/internal-comments', async (req: Request, res: Response) =
         res.status(500).send("Erro ao adicionar comentário interno.");
     }
 });
+
 
 // --- ROTAS DE CATEGORIAS (CRUD) ---
 app.get('/categories', async (req: Request, res: Response) => {
@@ -397,41 +426,62 @@ app.get('/settings/email', async (req: Request, res: Response) => {
 });
 app.post('/settings/email', async (req: Request, res: Response) => {
     try {
-        await db.collection('emailSettings').doc('main').set(req.body, { merge: true });
-        res.status(200).json(req.body);
-    } catch (error) { res.status(500).send("Erro ao salvar configurações de e-mail."); }
-});
-
-// Rota de teste de e-mail
-app.post('/send-test-email', async (req: Request, res: Response) => {
-    try {
-        const { to } = req.body;
-        await sendNotificationEmail(to, 'E-mail de Teste do Helpdesk', '<p>Este é um e-mail de teste.</p>');
-        res.status(200).send('E-mail de teste enviado com sucesso!');
-    } catch (error: any) {
-        console.error("Erro ao enviar e-mail de teste:", error);
-        res.status(500).send(`Erro ao enviar e-mail de teste: ${error.message}`);
+        // NÃO SALVA MAIS CREDENCIAIS SMTP AQUI, POIS USAMOS RESEND COM API KEY
+        // Você pode remover os campos smtpUser, smtpPassword, smtpServer, smtpPort
+        // da interface de frontend se quiser, ou apenas ignorá-los aqui.
+        // Vamos manter as opções de notificação:
+        const { notifyOnNew, notifyOnUpdate, notifyOnClose } = req.body;
+        await db.collection('emailSettings').doc('main').set({
+           notifyOnNew,
+           notifyOnUpdate,
+           notifyOnClose
+           // Adicione quaisquer outras configurações *não* relacionadas a SMTP que você queira salvar
+        }, { merge: true });
+        res.status(200).json({ notifyOnNew, notifyOnUpdate, notifyOnClose }); // Retorna apenas o que foi salvo
+    } catch (error) {
+        console.error("Erro ao salvar configurações de e-mail:", error);
+        res.status(500).send("Erro ao salvar configurações de e-mail.");
     }
 });
 
 
-// --- ROTA PARA UPLOAD DE FICHEIROS ---
+// Rota de teste de e-mail (agora usa Resend)
+app.post('/send-test-email', async (req: Request, res: Response) => {
+    const { to } = req.body;
+    if (!to) {
+        return res.status(400).send('O campo "to" é obrigatório.');
+    }
+    try {
+        // Chama a nova função sendNotificationEmail que usa Resend
+        await sendNotificationEmail(to, 'E-mail de Teste do Helpdesk (via Resend)', '<p>Este é um e-mail de teste enviado usando Resend.</p>');
+        res.status(200).send('Tentativa de envio de e-mail de teste iniciada com sucesso via Resend!');
+    } catch (error: any) {
+        // A função sendNotificationEmail já loga o erro, mas podemos enviar uma resposta de erro genérica
+        console.error("Erro na rota /send-test-email:", error);
+        // Evita expor detalhes do erro ao cliente
+        res.status(500).send(`Erro ao tentar iniciar o envio do e-mail de teste.`);
+    }
+});
+
+
+// --- ROTA PARA UPLOAD DE FICHEIROS (Cloudinary) ---
 app.post('/upload', upload.single('file'), (req: Request, res: Response) => {
     if (!req.file) {
         return res.status(400).send('Nenhum ficheiro enviado.');
     }
 
-    // A correção está aqui: usamos o '!' para dizer ao TypeScript que temos a certeza que req.file existe.
     cloudinary.uploader.upload_stream({ resource_type: 'auto' }, (error, result) => {
         if (error || !result) {
             console.error("Erro no upload para o Cloudinary:", error);
             return res.status(500).send('Erro ao fazer upload do ficheiro.');
         }
+        // Retorna a URL segura e o nome original do arquivo
         res.status(200).json({ url: result.secure_url, name: req.file!.originalname });
     }).end(req.file.buffer);
 });
 
 
+// --- INICIAR SERVIDOR ---
 app.listen(port, () => {
   console.log(`🚀 Servidor backend rodando em http://localhost:${port}`);
 });
