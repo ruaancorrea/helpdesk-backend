@@ -42,7 +42,7 @@ async function sendNotificationEmail(to: string, subject: string, html: string) 
 
     // Define o remetente usando o domínio padrão do Resend
     // Mude 'Helpdesk NTW Socium' para o nome que deseja que apareça
-    const fromAddress = 'Helpdesk NTW Socium <onboarding@resend.dev>';
+    const fromAddress = 'Helpdesk NTW Socium <helpdesk@ntwsocium.com.br>';
 
     try {
         console.log(`Tentando enviar e-mail para ${to} com assunto "${subject}" via Resend...`);
